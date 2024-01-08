@@ -1,5 +1,7 @@
 package go_kcp
 
+import "errors"
+
 type Number interface {
 	~int | ~int8 | ~int16 | ~int32 | ~int64 |
 		~uint | ~uint8 | ~uint16 | ~uint32 | ~uint64 |
@@ -27,3 +29,10 @@ func itImeDiff(later, earlier uint32) uint32 {
 func bound[T Number](lower, middle, upper T) T {
 	return min(max(lower, middle), upper)
 }
+
+var (
+	ErrorMssInvalid      = errors.New("err mss is invalid")
+	ErrorsFragLimit      = errors.New("frag over limit")
+	ErrorsInvalidKcpHead = errors.New("invalid kcp head")
+	ErrorsInvalidConv    = errors.New("invalid kcp conv")
+)
