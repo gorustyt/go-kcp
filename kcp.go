@@ -62,7 +62,7 @@ type IKcp struct {
 	interval   uint32     //内部flush刷新间隔
 	ts_flush   uint32     //下次flush刷新时间戳
 	xmit       uint32     //总共重发次数
-	nodelay    uint32     // nodelay  是否启动无延迟模式
+	nodelay    int32      // nodelay  是否启动无延迟模式
 	updated    uint32     // updated  是否调用过update函数的标识（KCP需要上层通过不断的ikcp_update和ikcp_check来驱动KCP的收发过程）
 	ts_probe   uint32     // probe_wait 探查窗口需要等待的时间
 	probe_wait uint32     // probe_wait 探查窗口需要等待的时间
@@ -81,7 +81,7 @@ type IKcp struct {
 	nocwnd     int32 // nocwnd 取消拥塞控制 (丢包退让，慢启动)
 	stream     int32 // stream 是否采用流传输模式
 	logmask    int
-	output     func(buf []byte, kcp *IKcp, user any) int
+	SendMsg    func(buf []byte) (n int, err error) //udp 发送消息模块
 	writelog   func(log []byte, kcp *IKcp, user any)
 }
 
@@ -129,28 +129,26 @@ func NewIKcp(id uint32, user any) *IKcp {
 	kcp.nocwnd = 0
 	kcp.xmit = 0
 	kcp.dead_link = IKCP_DEADLINK
-	kcp.output = nil
-	kcp.writelog = nil
 	return kcp
 }
 
 // 控制滑动窗口大小
-func (k *IKcp) SetWndSize(sndwnd, rcvwnd uint32) {
+func (kcp *IKcp) SetWndSize(sndwnd, rcvwnd uint32) {
 	if sndwnd > 0 {
-		k.snd_wnd = sndwnd
+		kcp.snd_wnd = sndwnd
 	}
 	if rcvwnd > 0 { // must >= max fragment size
-		k.rcv_wnd = Max(rcvwnd, IKCP_WND_RCV)
+		kcp.rcv_wnd = max(rcvwnd, IKCP_WND_RCV)
 	}
 }
 
-func (k *IKcp) NoDelay(noDelay uint32, interval uint32, resend int32, nc int32) {
+func (kcp *IKcp) NoDelay(noDelay int32, interval int32, resend int32, nc int32) {
 	if noDelay >= 0 {
-		k.nodelay = noDelay
+		kcp.nodelay = noDelay
 		if noDelay != 0 {
-			k.rx_minrto = IKCP_RTO_NDL
+			kcp.rx_minrto = IKCP_RTO_NDL
 		} else {
-			k.rx_minrto = IKCP_RTO_MIN
+			kcp.rx_minrto = IKCP_RTO_MIN
 		}
 	}
 	if interval >= 0 {
@@ -159,62 +157,62 @@ func (k *IKcp) NoDelay(noDelay uint32, interval uint32, resend int32, nc int32) 
 		} else if interval < 10 {
 			interval = 10
 		}
-		k.interval = interval
+		kcp.interval = uint32(interval)
 	}
 	if resend >= 0 {
-		k.fastresend = resend
+		kcp.fastresend = resend
 	}
 	if nc >= 0 {
-		k.nocwnd = nc
+		kcp.nocwnd = nc
 	}
 
 }
 
-func (k *IKcp) SetMtu(mtu uint32) error {
+func (kcp *IKcp) SetMtu(mtu uint32) error {
 	if mtu < 50 || mtu < IKCP_OVERHEAD {
 		return errors.New("ERROR_OVERHEAD")
 	}
 
 	buffer := make([]byte, (mtu+IKCP_OVERHEAD)*3)
-	k.mtu = mtu
-	k.mss = k.mtu - IKCP_OVERHEAD
-	k.buffer = buffer
+	kcp.mtu = mtu
+	kcp.mss = kcp.mtu - IKCP_OVERHEAD
+	kcp.buffer = buffer
 	return nil
 }
 
-func (k *IKcp) Interval(interval uint32) {
+func (kcp *IKcp) Interval(interval uint32) {
 	if interval > 5000 {
 		interval = 5000
 	} else if interval < 10 {
 		interval = 10
 	}
-	k.interval = interval
+	kcp.interval = interval
 
 }
 
-func (k *IKcp) Update(current uint32) {
+func (kcp *IKcp) Update(current uint32) {
 	var slap int32
 
-	k.current = current
+	kcp.current = current
 
-	if k.updated == 0 {
-		k.updated = 1
-		k.ts_flush = k.current
+	if kcp.updated == 0 {
+		kcp.updated = 1
+		kcp.ts_flush = kcp.current
 	}
 
-	slap = int32(itImeDiff(k.current, k.ts_flush))
+	slap = int32(itImeDiff(kcp.current, kcp.ts_flush))
 
 	if slap >= 10000 || slap < -10000 {
-		k.ts_flush = k.current
+		kcp.ts_flush = kcp.current
 		slap = 0
 	}
 
 	if slap >= 0 {
-		k.ts_flush += k.interval
-		if itImeDiff(k.current, k.ts_flush) >= 0 {
-			k.ts_flush = k.current + k.interval
+		kcp.ts_flush += kcp.interval
+		if itImeDiff(kcp.current, kcp.ts_flush) >= 0 {
+			kcp.ts_flush = kcp.current + kcp.interval
 		}
-		k.Flush()
+		kcp.Flush()
 	}
 }
 
@@ -247,11 +245,11 @@ func (kcp *IKcp) Peek() (length int) {
 	return length
 }
 
-func (kcp *IKcp) Recv(buffer []byte, isPeek bool) (n uint32, err error) {
+func (kcp *IKcp) Recv(buffer []byte, isPeek bool) (n int, err error) {
 	isRecover := false
 	var seg *ISeg
 	if kcp.rcv_queue.Len() == 0 {
-		return 0, ErrorQueueIsEmpty
+		return 0, nil
 	}
 	peeksize := kcp.Peek()
 
@@ -314,7 +312,7 @@ func (kcp *IKcp) Recv(buffer []byte, isPeek bool) (n uint32, err error) {
 		kcp.probe |= IKCP_ASK_TELL
 	}
 
-	return length, nil
+	return int(length), nil
 }
 func (kcp *IKcp) GetUnusedWnd() uint32 {
 	if uint32(kcp.rcv_queue.Len()) < kcp.rcv_wnd {
@@ -352,7 +350,7 @@ func (kcp *IKcp) Flush() {
 		size = ptr - buffer
 		if uint32(size)+IKCP_OVERHEAD > kcp.mtu {
 			kcp.Output(kcp.buffer[buffer:ptr])
-			buffer = ptr
+			ptr = buffer
 		}
 		seg.sn, seg.ts = kcp.AckGet(i)
 		data := seg.Encode()
@@ -393,7 +391,7 @@ func (kcp *IKcp) Flush() {
 		size = ptr - buffer
 		if size+IKCP_OVERHEAD > kcp.mtu {
 			kcp.Output(kcp.buffer[buffer:ptr])
-			buffer = ptr
+			ptr = buffer
 		}
 		data := seg.Encode()
 		copy(kcp.buffer[ptr:], data)
@@ -403,10 +401,10 @@ func (kcp *IKcp) Flush() {
 	// flush window probing commands
 	if kcp.probe&IKCP_ASK_TELL != 0 {
 		seg.cmd = IKCP_CMD_WINS
-		size = (ptr - buffer)
+		size = ptr - buffer
 		if size+IKCP_OVERHEAD > kcp.mtu {
 			kcp.Output(kcp.buffer[buffer:ptr])
-			buffer = ptr
+			ptr = buffer
 		}
 		data := seg.Encode()
 		copy(kcp.buffer[ptr:], data)
@@ -416,19 +414,20 @@ func (kcp *IKcp) Flush() {
 	kcp.probe = 0
 
 	// calculate window size
-	cwnd = Min(kcp.snd_wnd, kcp.rmt_wnd)
+	cwnd = min(kcp.snd_wnd, kcp.rmt_wnd)
 	if kcp.nocwnd == 0 {
-		cwnd = Min(kcp.cwnd, cwnd)
+		cwnd = min(kcp.cwnd, cwnd)
 	}
 
 	// move data from snd_queue to snd_buf
 	for itImeDiff(kcp.snd_nxt, kcp.snd_una+cwnd) < 0 {
-		var newseg *ISeg
+
 		if kcp.snd_queue.Len() == 0 {
 			break
 		}
-
-		newseg = kcp.snd_queue.Front().Value.(*ISeg)
+		v := kcp.snd_queue.Front()
+		kcp.snd_queue.Remove(v)
+		newseg := v.Value.(*ISeg)
 		newseg.node = kcp.snd_buf.PushBack(newseg)
 		newseg.conv = kcp.conv
 		newseg.cmd = IKCP_CMD_PUSH
@@ -456,14 +455,14 @@ func (kcp *IKcp) Flush() {
 	// flush data segments
 	for p := kcp.snd_buf.Front(); p != nil; p = p.Next() {
 		segment := p.Value.(*ISeg)
-		needsend := 0
+		needsend := false
 		if segment.xmit == 0 {
-			needsend = 1
+			needsend = true
 			segment.xmit++
 			segment.rto = kcp.rx_rto
 			segment.resendts = current + uint32(segment.rto) + rtomin
 		} else if itImeDiff(current, segment.resendts) >= 0 {
-			needsend = 1
+			needsend = true
 			segment.xmit++
 			kcp.xmit++
 			if kcp.nodelay == 0 {
@@ -477,9 +476,9 @@ func (kcp *IKcp) Flush() {
 			}
 			segment.resendts = current + uint32(segment.rto)
 			lost = 1
-		} else if segment.fastack >= resent {
+		} else if segment.fastack >= resent { //触发快速重传
 			if int32(segment.xmit) <= kcp.fastlimit || kcp.fastlimit <= 0 {
-				needsend = 1
+				needsend = true
 				segment.xmit++
 				segment.fastack = 0
 				segment.resendts = current + uint32(segment.rto)
@@ -487,7 +486,7 @@ func (kcp *IKcp) Flush() {
 			}
 		}
 
-		if needsend != 0 {
+		if needsend {
 			var need uint32
 			segment.ts = current
 			segment.wnd = seg.wnd
@@ -498,7 +497,7 @@ func (kcp *IKcp) Flush() {
 
 			if size+need > kcp.mtu {
 				kcp.Output(kcp.buffer[buffer:ptr])
-				buffer = ptr
+				ptr = buffer
 			}
 
 			data := segment.Encode()
@@ -518,21 +517,21 @@ func (kcp *IKcp) Flush() {
 	size = ptr - buffer
 	if size > 0 {
 		kcp.Output(kcp.buffer[buffer:ptr])
+		ptr = buffer
 	}
 
-	// update ssthresh
-	if change != 0 {
+	if change != 0 { //快恢复，触发快速重传机制
 		inflight := kcp.snd_nxt - kcp.snd_una
-		kcp.ssthresh = inflight / 2
+		kcp.ssthresh = inflight / 2 //表示网络可能出现了阻塞,值变为1半
 		if kcp.ssthresh < IKCP_THRESH_MIN {
 			kcp.ssthresh = IKCP_THRESH_MIN
 		}
 
-		kcp.cwnd = kcp.ssthresh + resent
+		kcp.cwnd = kcp.ssthresh + resent //加  resent 代表快速重传时已经确认接收到了  resent 个重复的数据包
 		kcp.incr = kcp.cwnd * kcp.mss
 	}
 
-	if lost != 0 {
+	if lost != 0 { //慢启动，发生了超时重传，使用拥塞发生算法。
 		kcp.ssthresh = cwnd / 2
 		if kcp.ssthresh < IKCP_THRESH_MIN {
 			kcp.ssthresh = IKCP_THRESH_MIN
@@ -548,7 +547,7 @@ func (kcp *IKcp) Flush() {
 }
 
 // 上层应用发送数据
-func (kcp *IKcp) Send(buffer []byte) (sent uint32, err error) {
+func (kcp *IKcp) Send(buffer []byte) (sent int, err error) {
 	var seg ISeg
 	var count uint32
 	var i uint32
@@ -576,7 +575,7 @@ func (kcp *IKcp) Send(buffer []byte) (sent uint32, err error) {
 				seg.len = old.len + extend
 				seg.frg = 0
 				totalLen -= extend
-				sent = extend
+				sent = int(extend)
 				if extend == uint32(len(buffer)) {
 					buffer = buffer[:0]
 				} else {
@@ -626,7 +625,7 @@ func (kcp *IKcp) Send(buffer []byte) (sent uint32, err error) {
 		if size < uint32(len(buffer)) {
 			buffer = buffer[size:]
 		}
-		sent += size
+		sent += int(size)
 	}
 
 	return sent, nil
@@ -636,6 +635,7 @@ func (kcp *IKcp) Send(buffer []byte) (sent uint32, err error) {
 // parse ack
 // ---------------------------------------------------------------------
 func (kcp *IKcp) UpdateAck(rtt int32) {
+	//RTT指的是数据发送时刻到接收到确认的时刻的差值，也就是包的往返时间。
 	rto := int32(0)
 	if kcp.rx_srtt == 0 {
 		kcp.rx_srtt = rtt
@@ -652,7 +652,9 @@ func (kcp *IKcp) UpdateAck(rtt int32) {
 		}
 	}
 	rto = kcp.rx_srtt + int32(max(kcp.interval, uint32(4*kcp.rx_rttval)))
+	//RTO指超时重传时间
 	kcp.rx_rto = bound(kcp.rx_minrto, rto, IKCP_RTO_MAX)
+
 }
 
 func (kcp *IKcp) ShrinkBuf() {
@@ -665,12 +667,11 @@ func (kcp *IKcp) ShrinkBuf() {
 }
 
 func (kcp *IKcp) ParseAck(sn uint32) {
-
-	if itImeDiff(sn, kcp.snd_una) < 0 || itImeDiff(sn, kcp.snd_nxt) >= 0 {
+	if itImeDiff(sn, kcp.snd_una) < 0 || itImeDiff(sn, kcp.snd_nxt) >= 0 { //序列号应该在这个之间
 		return
 	}
 
-	for p := kcp.snd_buf.Front(); p != nil; p = p.Next() {
+	for p := kcp.snd_buf.Front(); p != nil; p = p.Next() { //删除已经收到ack 的消息
 		seg := p.Value.(*ISeg)
 		if sn == seg.sn {
 			kcp.snd_buf.Remove(p)
@@ -682,9 +683,10 @@ func (kcp *IKcp) ParseAck(sn uint32) {
 	}
 }
 
+// 将小于una 的数据报全部删除
 func (kcp *IKcp) ParseUna(una uint32) {
 	for v := kcp.snd_buf.Front(); v != nil; v = v.Next() {
-		if una > v.Value.(*ISeg).sn { //将小于una 的数据报全部删除
+		if una > v.Value.(*ISeg).sn {
 			kcp.snd_buf.Remove(v)
 		} else {
 			break
@@ -776,12 +778,12 @@ func (kcp *IKcp) ParseData(newSeg *ISeg) {
 }
 
 // output segment
-func (kcp *IKcp) Output(data []byte) int {
+func (kcp *IKcp) Output(data []byte) {
 	log.Printf("%v [RO] %v bytes", IKCP_LOG_OUTPUT, len(data))
 	if len(data) == 0 {
-		return -1
+		return
 	}
-	return kcp.output(data, kcp, kcp.user)
+	kcp.SendMsg(data)
 }
 
 // udp底层调用该模块去接收数据
@@ -792,12 +794,12 @@ func (kcp *IKcp) Input(data []byte) error {
 	flag := 0
 
 	log.Printf("[RI] %d bytes", len(data))
-	if len(data) == 0 || len(data) < IKCP_OVERHEAD {
+	if len(data) == 0 || len(data) < IKCP_OVERHEAD { //如果传入数据为空或者长度小于包头的大小，数据错误
 		return ErrorsInvalidKcpHead
 	}
 	for {
 		seg := &ISeg{}
-		if len(data) < IKCP_OVERHEAD {
+		if len(data) < IKCP_OVERHEAD { //可以处理的消息已经处理完了
 			break
 		}
 		err := seg.Decode(data)
@@ -805,10 +807,10 @@ func (kcp *IKcp) Input(data []byte) error {
 			return err
 		}
 		data = data[IKCP_OVERHEAD:]
-		if seg.conv != kcp.conv {
+		if seg.conv != kcp.conv { //错误的会话id
 			return ErrorsInvalidConv
 		}
-		if seg.cmd != IKCP_CMD_PUSH && seg.cmd != IKCP_CMD_ACK &&
+		if seg.cmd != IKCP_CMD_PUSH && seg.cmd != IKCP_CMD_ACK && //错误的指令
 			seg.cmd != IKCP_CMD_WASK && seg.cmd != IKCP_CMD_WINS {
 			return ErrorSegCmdTypeInvalid
 		}
@@ -857,7 +859,7 @@ func (kcp *IKcp) Input(data []byte) error {
 			log.Printf("%v input probe", IKCP_LOG_IN_PROBE)
 		} else if seg.cmd == IKCP_CMD_WINS {
 			// do nothing
-			log.Printf("%v input wins: %lu", IKCP_LOG_IN_WINS, seg.wnd)
+			log.Printf("%v input wins: %v", IKCP_LOG_IN_WINS, seg.wnd)
 		} else {
 			return ErrorSegCmdTypeInvalid
 		}
@@ -872,7 +874,7 @@ func (kcp *IKcp) Input(data []byte) error {
 	if itImeDiff(kcp.snd_una, prev_una) > 0 {
 		if kcp.cwnd < kcp.rmt_wnd {
 			mss := kcp.mss
-			if kcp.cwnd < kcp.ssthresh {
+			if kcp.cwnd < kcp.ssthresh { //慢启动的算法：当发送方每收到一个 ACK，拥塞窗口 cwnd 的大小就会加 1。
 				kcp.cwnd++
 				kcp.incr += mss
 			} else {
