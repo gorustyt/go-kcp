@@ -5,10 +5,14 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="9e644f2c-a5f3-4888-8544-7b33d689a4a5" name="Changes" comment="">
-      <change beforePath="$PROJECT_DIR$/.idea/go-kcp.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/go-kcp.iml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/common.go" beforeDir="false" afterPath="$PROJECT_DIR$/common.go" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/example/client.go" beforeDir="false" afterPath="$PROJECT_DIR$/example/client.go" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/example/main.go" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/example/server.go" beforeDir="false" afterPath="$PROJECT_DIR$/example/server.go" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/kcp.go" beforeDir="false" afterPath="$PROJECT_DIR$/kcp.go" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/log.go" beforeDir="false" afterPath="$PROJECT_DIR$/log.go" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/net.go" beforeDir="false" afterPath="$PROJECT_DIR$/net.go" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/seg.go" beforeDir="false" afterPath="$PROJECT_DIR$/seg.go" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -43,6 +47,35 @@
     "settings.editor.selected.configurable": "go.sdk"
   }
 }]]></component>
+  <component name="RunManager" selected="Go Build.server">
+    <configuration name="client" type="GoApplicationRunConfiguration" factoryName="Go Application" temporary="true">
+      <module name="go-kcp" />
+      <working_directory value="$PROJECT_DIR$" />
+      <kind value="FILE" />
+      <package value="github.com/gorustyt/go-kcp/example" />
+      <directory value="$PROJECT_DIR$" />
+      <filePath value="$PROJECT_DIR$/example/client.go" />
+      <method v="2" />
+    </configuration>
+    <configuration name="server" type="GoApplicationRunConfiguration" factoryName="Go Application">
+      <module name="go-kcp" />
+      <working_directory value="$PROJECT_DIR$" />
+      <kind value="FILE" />
+      <package value="github.com/gorustyt/go-kcp/example" />
+      <directory value="$PROJECT_DIR$" />
+      <filePath value="$PROJECT_DIR$/example/server.go" />
+      <method v="2" />
+    </configuration>
+    <list>
+      <item itemvalue="Go Build.server" />
+      <item itemvalue="Go Build.client" />
+    </list>
+    <recent_temporary>
+      <list>
+        <item itemvalue="Go Build.client" />
+      </list>
+    </recent_temporary>
+  </component>
   <component name="SpellCheckerSettings" RuntimeDictionaries="0" Folders="0" CustomDictionaries="0" DefaultDictionary="application-level" UseSingleDictionary="true" transferred="true" />
   <component name="TypeScriptGeneratedFilesManager">
     <option name="version" value="3" />

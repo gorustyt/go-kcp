@@ -8,7 +8,8 @@ import (
 )
 
 func main() {
-	c, err := go_kcp.Dail("udp", ":8080")
+	go_kcp.SetLogLevel(go_kcp.LogLevelDebug)
+	c, err := go_kcp.Dial("udp", "127.0.0.1:8080")
 	if err != nil {
 		panic(err)
 	}
@@ -24,11 +25,11 @@ func main() {
 		}
 	}()
 	for {
-		var b [4096]byte
+		var b [2048]byte
 		n, err := c.Read(b[:])
 		if err != nil {
 			panic(err)
 		}
-		fmt.Printf("recv1:%v ", string(b[:n]))
+		fmt.Printf("recv1:%v \n", string(b[:n]))
 	}
 }

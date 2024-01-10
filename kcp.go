@@ -3,7 +3,6 @@ package go_kcp
 import (
 	"container/list"
 	"errors"
-	"log"
 )
 
 const (
@@ -33,9 +32,9 @@ const (
 )
 
 type IConfig struct {
-	Define0               bool
-	Define1               bool
-	IKCP_FASTACK_CONSERVE bool
+	Define0         bool
+	Define1         bool
+	FastAckConServe bool
 }
 type IKcp struct {
 	*IConfig
@@ -78,7 +77,7 @@ type IKcp struct {
 	buffer     []byte
 	fastresend int32 // 触发快速重传的最大次数
 	fastlimit  int32
-	nocwnd     int32 // nocwnd 取消拥塞控制 (丢包退让，慢启动)
+	nocwnd     bool  // nocwnd 取消拥塞控制 (丢包退让，慢启动)
 	stream     int32 // stream 是否采用流传输模式
 	logmask    int
 	SendMsg    func(buf []byte) (n int, err error) //udp 发送消息模块
@@ -86,7 +85,7 @@ type IKcp struct {
 }
 
 func NewIKcp(id uint32, user any) *IKcp {
-	kcp := &IKcp{}
+	kcp := &IKcp{IConfig: &IConfig{Define1: true}}
 	kcp.conv = id
 	kcp.user = user
 	kcp.snd_una = 0
@@ -126,8 +125,6 @@ func NewIKcp(id uint32, user any) *IKcp {
 	kcp.ssthresh = IKCP_THRESH_INIT
 	kcp.fastresend = 0
 	kcp.fastlimit = IKCP_FASTACK_LIMIT
-	kcp.nocwnd = 0
-	kcp.xmit = 0
 	kcp.dead_link = IKCP_DEADLINK
 	return kcp
 }
@@ -142,7 +139,7 @@ func (kcp *IKcp) SetWndSize(sndwnd, rcvwnd uint32) {
 	}
 }
 
-func (kcp *IKcp) NoDelay(noDelay int32, interval int32, resend int32, nc int32) {
+func (kcp *IKcp) NoDelay(noDelay int32, interval int32, resend int32, nc bool) {
 	if noDelay >= 0 {
 		kcp.nodelay = noDelay
 		if noDelay != 0 {
@@ -162,7 +159,8 @@ func (kcp *IKcp) NoDelay(noDelay int32, interval int32, resend int32, nc int32) 
 	if resend >= 0 {
 		kcp.fastresend = resend
 	}
-	if nc >= 0 {
+
+	if nc {
 		kcp.nocwnd = nc
 	}
 
@@ -216,10 +214,6 @@ func (kcp *IKcp) Update(current uint32) {
 	}
 }
 
-var (
-	ErrorQueueIsEmpty = errors.New("ErrorQueueIsEmpty")
-)
-
 func (kcp *IKcp) Peek() (length int) {
 	if kcp.rcv_queue.Len() == 0 {
 		return -1
@@ -256,11 +250,6 @@ func (kcp *IKcp) Recv(buffer []byte, isPeek bool) (n int, err error) {
 	if peeksize < 0 {
 		return n, ErrorHasPartPeekSize
 	}
-
-	if peeksize > len(buffer) {
-		return n, ErrorNeedSizeOverHas
-	}
-
 	if kcp.rcv_queue.Len() >= int(kcp.rcv_wnd) {
 		isRecover = true
 	}
@@ -268,28 +257,30 @@ func (kcp *IKcp) Recv(buffer []byte, isPeek bool) (n int, err error) {
 	// merge fragment
 	p := kcp.rcv_queue.Front()
 	length := uint32(0)
-	for p = kcp.rcv_queue.Front(); p != nil; {
+	for p != nil {
 		seg = p.Value.(*ISeg)
-		p = p.Next()
-		if len(buffer) > 0 {
+		if len(buffer) >= int(seg.len) { //如果buffer容量超过一个包的，直接拷贝全部
 			copy(buffer, seg.data)
+		} else {
+			copy(buffer, seg.data[:len(buffer)]) //只拷贝buffer容量大小
+			length += uint32(len(buffer))
+			if !isPeek {
+				seg.len -= uint32(len(buffer))
+				seg.data = seg.data[len(buffer):]
+			}
 		}
-
 		length += seg.len
 		fragment := seg.frg
-		log.Printf("%v recv sn=%v", IKCP_LOG_RECV, seg.sn)
+		Info("%v recv sn=%v", IKCP_LOG_RECV, seg.sn)
 		if !isPeek {
+			putSegToPool(seg)
 			kcp.rcv_queue.Remove(p)
 		}
-
+		p = p.Next()
 		if fragment == 0 {
 			break
 		}
 
-	}
-
-	if int(length) != peeksize {
-		return n, ErrorSegInvalidPeekSize
 	}
 
 	// move available data from rcv_buf . rcv_queue
@@ -335,7 +326,8 @@ func (kcp *IKcp) Flush() {
 	if kcp.updated == 0 {
 		return
 	}
-	var seg ISeg
+	seg := getSegFromPool()
+	defer putSegToPool(seg)
 	seg.conv = kcp.conv
 	seg.cmd = IKCP_CMD_ACK
 	seg.frg = 0
@@ -415,7 +407,7 @@ func (kcp *IKcp) Flush() {
 
 	// calculate window size
 	cwnd = min(kcp.snd_wnd, kcp.rmt_wnd)
-	if kcp.nocwnd == 0 {
+	if !kcp.nocwnd {
 		cwnd = min(kcp.cwnd, cwnd)
 	}
 
@@ -428,7 +420,7 @@ func (kcp *IKcp) Flush() {
 		v := kcp.snd_queue.Front()
 		kcp.snd_queue.Remove(v)
 		newseg := v.Value.(*ISeg)
-		newseg.node = kcp.snd_buf.PushBack(newseg)
+		kcp.snd_buf.PushBack(newseg)
 		newseg.conv = kcp.conv
 		newseg.cmd = IKCP_CMD_PUSH
 		newseg.wnd = seg.wnd
@@ -501,7 +493,8 @@ func (kcp *IKcp) Flush() {
 			}
 
 			data := segment.Encode()
-			copy(kcp.buffer[ptr:], data) //TODO
+			copy(kcp.buffer[ptr:], data)
+			ptr += uint32(len(data))
 			if segment.len > 0 {
 				copy(kcp.buffer[ptr:], segment.data)
 				ptr += segment.len
@@ -544,11 +537,12 @@ func (kcp *IKcp) Flush() {
 		kcp.cwnd = 1
 		kcp.incr = kcp.mss
 	}
+
 }
 
 // 上层应用发送数据
 func (kcp *IKcp) Send(buffer []byte) (sent int, err error) {
-	var seg ISeg
+	var seg *ISeg
 	var count uint32
 	var i uint32
 	if kcp.mss <= 0 {
@@ -568,6 +562,9 @@ func (kcp *IKcp) Send(buffer []byte) (sent int, err error) {
 				extend := capacity
 				if len(buffer) < int(capacity) { //发送数据小于剩余容量
 					extend = uint32(len(buffer)) //直接取发送数据大小
+				}
+				if seg.data == nil {
+					seg.data = GetBufferFromPool(int(kcp.mss))
 				}
 				if len(buffer) > 0 { //将数据添加到最后一个包上面去
 					seg.data = append(seg.data, buffer[:extend]...)
@@ -613,7 +610,7 @@ func (kcp *IKcp) Send(buffer []byte) (sent int, err error) {
 		if len(buffer) > int(kcp.mss) {
 			size = kcp.mss
 		}
-		seg = ISeg{}
+		seg = getSegFromPool()
 		if len(buffer) > 0 {
 			seg.data = buffer[:size]
 		}
@@ -621,7 +618,7 @@ func (kcp *IKcp) Send(buffer []byte) (sent int, err error) {
 		if kcp.stream == 0 { //分段id反过来，分配，这样可以通过frg==0来判断是不是最后一个包
 			seg.frg = count - i - 1
 		}
-		seg.node = kcp.snd_queue.PushBack(&seg)
+		kcp.snd_queue.PushBack(seg)
 		if size < uint32(len(buffer)) {
 			buffer = buffer[size:]
 		}
@@ -705,13 +702,12 @@ func (kcp *IKcp) ParseFastAck(sn uint32, ts uint32) {
 		if itImeDiff(sn, seg.sn) < 0 {
 			break
 		} else if sn != seg.sn {
-			if kcp.IKCP_FASTACK_CONSERVE {
+			if kcp.FastAckConServe {
 				seg.fastack++
 			} else {
 				if itImeDiff(ts, seg.ts) >= 0 {
 					seg.fastack++
 				}
-
 			}
 		}
 	}
@@ -749,17 +745,20 @@ func (kcp *IKcp) ParseData(newSeg *ISeg) {
 	}
 
 	if !repeat {
-		kcp.rcv_buf.InsertAfter(newSeg, p.Value.(*ISeg).node)
+		if p == nil {
+			kcp.rcv_buf.PushBack(newSeg)
+		} else {
+			kcp.rcv_buf.InsertAfter(newSeg, p)
+		}
 	}
 	//#if 0
 	//ikcp_qprint("rcvbuf", &kcp.rcv_buf);
-	//printf("rcv_nxt=%lu\n", kcp.rcv_nxt);
-	//#endif
+	Debug("rcv_nxt=%v", kcp.rcv_nxt)
 	for v := kcp.rcv_buf.Front(); v != nil; v = v.Next() {
 		seg := v.Value.(*ISeg)
 		if seg.sn == kcp.rcv_nxt && uint32(kcp.rcv_queue.Len()) < kcp.rcv_wnd {
 			kcp.rcv_buf.Remove(v)
-			seg.node = kcp.rcv_queue.PushBack(seg)
+			kcp.rcv_queue.PushBack(seg)
 			kcp.rcv_nxt++
 		} else {
 			break
@@ -768,22 +767,20 @@ func (kcp *IKcp) ParseData(newSeg *ISeg) {
 
 	//#if 0
 	//ikcp_qprint("queue", &kcp.rcv_queue);
-	//printf("rcv_nxt=%lu\n", kcp.rcv_nxt);
-	//#endif
-
-	//#if 1
-	////	printf("snd(buf=%d, queue=%d)\n", kcp.nsnd_buf, kcp.nsnd_que);
-	////	printf("rcv(buf=%d, queue=%d)\n", kcp.nrcv_buf, kcp.nrcv_que);
-	//#endif
+	Debug("rcv_nxt=%v", kcp.rcv_nxt)
+	Debug("snd(buf=%d, queue=%d)", kcp.snd_buf.Len(), kcp.snd_queue.Len())
+	Debug("rcv(buf=%d, queue=%d)", kcp.rcv_buf.Len(), kcp.rcv_queue.Len())
 }
 
-// output segment
 func (kcp *IKcp) Output(data []byte) {
-	log.Printf("%v [RO] %v bytes", IKCP_LOG_OUTPUT, len(data))
+	Info("%v [RO] %v bytes", IKCP_LOG_OUTPUT, len(data))
 	if len(data) == 0 {
 		return
 	}
-	kcp.SendMsg(data)
+	_, err := kcp.SendMsg(data)
+	if err != nil {
+		Debug("kcp send data error:%v ", err)
+	}
 }
 
 // udp底层调用该模块去接收数据
@@ -793,12 +790,12 @@ func (kcp *IKcp) Input(data []byte) error {
 	latest_ts := uint32(0)
 	flag := 0
 
-	log.Printf("[RI] %d bytes", len(data))
+	Info("[RI] %d bytes", len(data))
 	if len(data) == 0 || len(data) < IKCP_OVERHEAD { //如果传入数据为空或者长度小于包头的大小，数据错误
 		return ErrorsInvalidKcpHead
 	}
 	for {
-		seg := &ISeg{}
+		seg := getSegFromPool()
 		if len(data) < IKCP_OVERHEAD { //可以处理的消息已经处理完了
 			break
 		}
@@ -807,6 +804,9 @@ func (kcp *IKcp) Input(data []byte) error {
 			return err
 		}
 		data = data[IKCP_OVERHEAD:]
+		if kcp.conv == 0 {
+			kcp.conv = seg.conv
+		}
 		if seg.conv != kcp.conv { //错误的会话id
 			return ErrorsInvalidConv
 		}
@@ -831,7 +831,7 @@ func (kcp *IKcp) Input(data []byte) error {
 				latest_ts = seg.ts
 			} else {
 				if itImeDiff(seg.sn, maxack) > 0 {
-					if kcp.IKCP_FASTACK_CONSERVE {
+					if kcp.FastAckConServe {
 						maxack = seg.sn
 						latest_ts = seg.ts
 					} else {
@@ -842,12 +842,12 @@ func (kcp *IKcp) Input(data []byte) error {
 					}
 				}
 			}
-			log.Printf(
+			Info(
 				"%v input ack: sn=%v rtt=%v rto=%v", IKCP_LOG_IN_ACK, seg.sn,
 				itImeDiff(kcp.current, seg.ts),
 				kcp.rx_rto)
 		} else if seg.cmd == IKCP_CMD_PUSH {
-			log.Printf("%v input psh: sn=%v ts=%v", IKCP_LOG_IN_DATA, seg.sn, seg.ts)
+			Info("%v input psh: sn=%v ts=%v", IKCP_LOG_IN_DATA, seg.sn, seg.ts)
 			if itImeDiff(seg.sn, kcp.rcv_nxt+kcp.rcv_wnd) < 0 {
 				kcp.AckPush(seg.sn, seg.ts)
 				kcp.ParseData(seg)
@@ -856,10 +856,10 @@ func (kcp *IKcp) Input(data []byte) error {
 			// ready to send back IKCP_CMD_WINS in ikcp_flush
 			// tell remote my window size
 			kcp.probe |= IKCP_ASK_TELL
-			log.Printf("%v input probe", IKCP_LOG_IN_PROBE)
+			Info("%v input probe", IKCP_LOG_IN_PROBE)
 		} else if seg.cmd == IKCP_CMD_WINS {
 			// do nothing
-			log.Printf("%v input wins: %v", IKCP_LOG_IN_WINS, seg.wnd)
+			Info("%v input wins: %v", IKCP_LOG_IN_WINS, seg.wnd)
 		} else {
 			return ErrorSegCmdTypeInvalid
 		}
@@ -901,4 +901,8 @@ func (kcp *IKcp) Input(data []byte) error {
 	}
 
 	return nil
+}
+
+func (kcp *IKcp) WaitSnd() int {
+	return kcp.snd_buf.Len() + kcp.snd_queue.Len()
 }

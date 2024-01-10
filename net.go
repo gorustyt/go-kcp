@@ -1,18 +1,32 @@
 package go_kcp
 
 import (
+	"crypto/rand"
+	"encoding/binary"
+	"errors"
+	"io"
 	"net"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
+var (
+	errTimeout = errors.New("timeout")
+)
+
+type accept struct {
+	*conn
+	err error
+}
+
 var id uint32
 
 type listener struct {
 	*net.UDPConn
-	lock sync.Mutex
-	ss   map[net.Addr]*conn
+	mu      sync.Mutex
+	ss      map[string]*conn
+	actChan chan *accept
 }
 
 func (l *listener) Addr() net.Addr {
@@ -20,7 +34,57 @@ func (l *listener) Addr() net.Addr {
 }
 
 func (l *listener) Accept() (net.Conn, error) {
-	return newConn(l.UDPConn), nil
+	v := <-l.actChan
+	return v.conn, v.err
+}
+
+func (l *listener) Close() error {
+	err := l.UDPConn.Close()
+	if err != nil {
+		Info("listener close error %v", err)
+	}
+	for _, v := range l.ss {
+		v.err = io.ErrClosedPipe
+		err = v.Close()
+		if err != nil {
+			Info("listener conn close error %v", err)
+		}
+	}
+	return nil
+}
+
+func (l *listener) removeConn(addr net.Addr) {
+	l.mu.Lock()
+	v := l.ss[addr.String()]
+	v.err = io.ErrClosedPipe
+	delete(l.ss, addr.String())
+	l.mu.Unlock()
+}
+
+func (l *listener) handleConn() {
+	var buffer [2048]byte
+	for {
+		n, addr, err := l.UDPConn.ReadFrom(buffer[:])
+		if err != nil {
+			l.actChan <- &accept{err: err}
+		}
+		l.mu.Lock()
+		s, ok := l.ss[addr.String()]
+		if !ok {
+			s = newConn(addr, l, l.UDPConn)
+			if len(l.actChan) < cap(l.actChan) {
+				l.actChan <- &accept{conn: s}
+			} else {
+				Info("conn is limit %v", cap(l.actChan))
+			}
+			l.ss[addr.String()] = s
+		}
+		err = s.Input(buffer[:n])
+		if err != nil {
+			s.err = err
+		}
+		l.mu.Unlock()
+	}
 }
 
 func Listen(network, address string) (net.Listener, error) {
@@ -32,39 +96,57 @@ func Listen(network, address string) (net.Listener, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &listener{UDPConn: l, ss: map[net.Addr]*conn{}}, nil
+	li := &listener{UDPConn: l, ss: map[string]*conn{}, actChan: make(chan *accept, 128)}
+	go li.handleConn()
+	return li, nil
 }
 
 type conn struct {
-	kcp    *IKcp
-	ticker *time.Ticker
-	mu     sync.Mutex
-	err    error
+	udpConn      *net.UDPConn
+	remote       net.Addr
+	l            *listener
+	kcp          *IKcp
+	mu           sync.Mutex
+	close        chan struct{}
+	err          error
+	chReadEvent  chan struct{}
+	chWriteEvent chan struct{}
+	readTimeOut  time.Time
+	writeTimeOut time.Time
 }
 
 func (c *conn) LocalAddr() net.Addr {
-	//TODO implement me
-	panic("implement me")
+	return c.udpConn.LocalAddr()
 }
 
 func (c *conn) SetDeadline(t time.Time) error {
-	//TODO implement me
-	panic("implement me")
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.readTimeOut = t
+	c.writeTimeOut = t
+	c.notifyReadEvent()
+	c.notifyWriteEvent()
+	return nil
 }
 
 func (c *conn) SetReadDeadline(t time.Time) error {
-	//TODO implement me
-	panic("implement me")
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.readTimeOut = t
+	c.notifyReadEvent()
+	return nil
 }
 
 func (c *conn) SetWriteDeadline(t time.Time) error {
-	//TODO implement me
-	panic("implement me")
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.writeTimeOut = t
+	c.notifyWriteEvent()
+	return nil
 }
 
 func (c *conn) RemoteAddr() net.Addr {
-	//TODO implement me
-	panic("implement me")
+	return c.remote
 }
 
 func (c *conn) Read(b []byte) (n int, err error) {
@@ -73,75 +155,175 @@ func (c *conn) Read(b []byte) (n int, err error) {
 			return 0, c.err
 		}
 		c.mu.Lock()
-		n, err = c.kcp.Recv(b, false)
-		c.mu.Unlock()
-		if err != nil {
-			return 0, err
-		}
-		if n != 0 {
+		if size := c.kcp.Peek(); size > 0 {
+			n, err = c.kcp.Recv(b, false)
+			c.mu.Unlock()
 			return n, err
+		}
+
+		var timeout *time.Timer
+		var ch <-chan time.Time
+		if !c.readTimeOut.IsZero() {
+			if time.Now().After(c.readTimeOut) {
+				c.mu.Unlock()
+				return 0, errTimeout
+			}
+
+			delay := time.Until(c.readTimeOut)
+			timeout = time.NewTimer(delay)
+			ch = timeout.C
+		}
+		c.mu.Unlock()
+		select {
+		case <-c.chReadEvent:
+		case <-ch:
+			if timeout != nil {
+				timeout.Stop()
+			}
+			return 0, errTimeout
+		case <-c.close:
+			return 0, io.ErrClosedPipe
 		}
 	}
 }
 
 func (c *conn) Write(b []byte) (n int, err error) {
+	if c.err != nil {
+		return 0, c.err
+	}
 	c.mu.Lock()
 	n, err = c.kcp.Send(b)
 	c.mu.Unlock()
-	return 0, err
+	select {
+	case <-c.chWriteEvent:
+		return 0, nil
+	case <-c.close:
+		return 0, io.ErrClosedPipe
+	}
 }
 
-func (c *conn) handleMsg() {
-	var buffer [4096]byte
-	for {
-		n, _, err := c.UDPConn.ReadFrom(buffer[:])
-		if err != nil {
-			c.err = err
-			break
-		}
-		c.mu.Lock()
-		err = c.kcp.Input(buffer[:n])
-		c.mu.Unlock()
-		if err != nil {
-			c.err = err
-			break
-		}
+func (c *conn) notifyReadEvent() {
+	select {
+	case c.chReadEvent <- struct{}{}:
+	default:
+	}
+}
+
+func (c *conn) notifyWriteEvent() {
+	select {
+	case c.chWriteEvent <- struct{}{}:
+	default:
 	}
 }
 
 func (c *conn) tick() {
-	c.ticker = time.NewTicker(10 * time.Millisecond)
-	select {
-	case <-c.ticker.C:
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-c.close:
+			return
+		case now := <-ticker.C:
+			c.mu.Lock()
+			c.kcp.Update(uint32(now.UnixMilli()))
+			waitsnd := c.kcp.WaitSnd()
+			if waitsnd < int(c.kcp.snd_wnd) && waitsnd < int(c.kcp.rmt_wnd) {
+				c.notifyWriteEvent()
+			}
+			c.mu.Unlock()
+		}
+	}
+}
+
+func (c *conn) readLoop() {
+	var buffer [2048]byte
+	for {
+		select {
+		case <-c.close:
+			return
+		default:
+		}
+		n, _, err := c.udpConn.ReadFrom(buffer[:])
+		if err != nil {
+			c.err = err
+			break
+		}
 		c.mu.Lock()
-		c.kcp.Flush()
+		c.err = c.Input(buffer[:n])
+		if c.err != nil {
+			c.mu.Unlock()
+			break
+		}
 		c.mu.Unlock()
 	}
 }
 
-func (c *conn) Close() error {
-	c.ticker.Stop()
-	return c.UDPConn.Close()
+func (c *conn) Input(data []byte) error {
+	err := c.kcp.Input(data)
+	c.err = err
+	if n := c.kcp.Peek(); n > 0 { //通过查看数据大小，通知读取协程有数据可以去读了
+		c.notifyReadEvent()
+	}
+
+	waitsnd := c.kcp.WaitSnd()
+	//发送队列包的数量小于玩家的发送窗口，同时小于对端的接收窗口
+	if waitsnd < int(c.kcp.snd_wnd) && waitsnd < int(c.kcp.rmt_wnd) { //通知玩家能写数据了
+		c.notifyWriteEvent()
+	}
+	return err
 }
 
-func newConn(c *net.UDPConn) net.Conn {
-	con := &conn{UDPConn: c, kcp: NewIKcp(atomic.LoadUint32(&id), "")}
+func (c *conn) NoDelay(noDelay int32, interval int32, resend int32, nc bool) {
+	c.mu.Lock()
+	c.kcp.NoDelay(noDelay, interval, resend, nc)
+	c.mu.Unlock()
+}
+
+func (c *conn) SetMtu(mtu uint32) error {
+	c.mu.Lock()
+	defer c.mu.Lock()
+	return c.kcp.SetMtu(mtu)
+}
+
+func (c *conn) Close() error {
+	sync.OnceFunc(func() {
+		close(c.close)
+	})
+	if c.l != nil {
+		c.l.removeConn(c.remote)
+		return c.err
+	} else {
+		return c.udpConn.Close()
+	}
+}
+
+func newConn(remote net.Addr, l *listener, udpConn *net.UDPConn) *conn {
+	con := &conn{kcp: NewIKcp(atomic.LoadUint32(&id), ""), l: l,
+		remote:       remote,
+		udpConn:      udpConn,
+		chWriteEvent: make(chan struct{}, 1),
+		chReadEvent:  make(chan struct{}, 1),
+		close:        make(chan struct{}, 1),
+	}
 	con.kcp.SendMsg = func(buf []byte) (n int, err error) {
-		return con.Write(buf)
+		return udpConn.WriteTo(buf, remote)
+	}
+	if l == nil {
+		go con.readLoop()
 	}
 	go con.tick()
-	go con.handleMsg()
 	return con
 }
 
-func Dail(network, address string) (net.Conn, error) {
-	addr, err := net.ResolveUDPAddr(network, address)
+func Dial(network, address string) (net.Conn, error) {
+	remote, err := net.ResolveUDPAddr(network, address)
 	if err != nil {
 		return nil, err
 	}
-	c, err := net.DialUDP("udp", nil, addr)
+	c, err := net.ListenUDP("udp", nil)
 	if err != nil {
 		return nil, err
 	}
-	return newConn(c), nil
+	co := newConn(remote, nil, c)
+	return co, binary.Read(rand.Reader, binary.BigEndian, &co.kcp.conv)
 }

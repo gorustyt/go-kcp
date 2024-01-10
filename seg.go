@@ -1,7 +1,6 @@
 package go_kcp
 
 import (
-	"container/list"
 	"encoding/binary"
 	"errors"
 )
@@ -11,24 +10,38 @@ var (
 	ErrorSegCmdTypeInvalid  = errors.New("invalid seg cmd type")
 	ErrorSegInvalidPeekSize = errors.New("invalid seg peek size")
 	ErrorHasPartPeekSize    = errors.New("only has  part seg peek size")
-	ErrorNeedSizeOverHas    = errors.New("need size over has")
 )
 
 type ISeg struct {
-	node     *list.Element //双向链表定义的队列 用于发送和接受队列的缓冲
-	conv     uint32        // conversation ，会话序列号：接收到的数据包与发送的一致才接收此数据包
-	cmd      uint32        //command，指令类型：代表这个segment的类型
-	frg      uint32        //fragment 分段序号
-	wnd      uint32        //接受窗口大小
-	ts       uint32        //timestamp，发送的时间戳
-	sn       uint32        //sequence number ， segment序号
-	una      uint32        //  unacknowledged，当前未收到的序号，即代表这个序号之前的包都收到
-	len      uint32        // 数据长度
-	resendts uint32        // 重发的时间戳
-	rto      int32         // 超时重传的时间间隔
-	fastack  uint32        // ack跳过的次数，用于快速重传
-	xmit     uint32        // 发送的次数（次数为1则是第一次发送，次数>=2则为重传）
-	data     []byte        // 用户数据
+	conv     uint32 // conversation ，会话序列号：接收到的数据包与发送的一致才接收此数据包
+	cmd      uint32 //command，指令类型：代表这个segment的类型
+	frg      uint32 //fragment 分段序号
+	wnd      uint32 //接受窗口大小
+	ts       uint32 //timestamp，发送的时间戳
+	sn       uint32 //sequence number ， segment序号
+	una      uint32 //  unacknowledged，当前未收到的序号，即代表这个序号之前的包都收到
+	len      uint32 // 数据长度
+	resendts uint32 // 重发的时间戳
+	rto      int32  // 超时重传的时间间隔
+	fastack  uint32 // ack跳过的次数，用于快速重传
+	xmit     uint32 // 发送的次数（次数为1则是第一次发送，次数>=2则为重传）
+	data     []byte // 用户数据
+}
+
+func (seg *ISeg) Reset() {
+	seg.conv = 0
+	seg.cmd = 0
+	seg.frg = 0
+	seg.wnd = 0
+	seg.ts = 0
+	seg.sn = 0
+	seg.una = 0
+	seg.len = 0
+	seg.resendts = 0
+	seg.rto = 0
+	seg.fastack = 0
+	seg.xmit = 0
+	seg.data = nil
 }
 
 func (seg *ISeg) Decode(data []byte) (err error) {
