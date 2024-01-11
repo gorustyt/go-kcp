@@ -273,18 +273,6 @@ func (c *conn) Input(data []byte) error {
 	return err
 }
 
-func (c *conn) NoDelay(noDelay int32, interval int32, resend int32, nc bool) {
-	c.mu.Lock()
-	c.kcp.NoDelay(noDelay, interval, resend, nc)
-	c.mu.Unlock()
-}
-
-func (c *conn) SetMtu(mtu uint32) error {
-	c.mu.Lock()
-	defer c.mu.Lock()
-	return c.kcp.SetMtu(mtu)
-}
-
 func (c *conn) Close() error {
 	sync.OnceFunc(func() {
 		close(c.close)

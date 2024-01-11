@@ -77,7 +77,7 @@ type IKcp struct {
 	buffer     []byte
 	fastresend int32 // 触发快速重传的最大次数
 	fastlimit  int32
-	nocwnd     bool  // nocwnd 取消拥塞控制 (丢包退让，慢启动)
+	nocwnd     int32 // nocwnd 取消拥塞控制 (丢包退让，慢启动)
 	stream     int32 // stream 是否采用流传输模式
 	logmask    int
 	SendMsg    func(buf []byte) (n int, err error) //udp 发送消息模块
@@ -125,6 +125,8 @@ func NewIKcp(id uint32, user any) *IKcp {
 	kcp.ssthresh = IKCP_THRESH_INIT
 	kcp.fastresend = 0
 	kcp.fastlimit = IKCP_FASTACK_LIMIT
+	kcp.nocwnd = 0
+	kcp.xmit = 0
 	kcp.dead_link = IKCP_DEADLINK
 	return kcp
 }
@@ -139,7 +141,7 @@ func (kcp *IKcp) SetWndSize(sndwnd, rcvwnd uint32) {
 	}
 }
 
-func (kcp *IKcp) NoDelay(noDelay int32, interval int32, resend int32, nc bool) {
+func (kcp *IKcp) NoDelay(noDelay int32, interval int32, resend int32, nc int32) {
 	if noDelay >= 0 {
 		kcp.nodelay = noDelay
 		if noDelay != 0 {
@@ -159,8 +161,7 @@ func (kcp *IKcp) NoDelay(noDelay int32, interval int32, resend int32, nc bool) {
 	if resend >= 0 {
 		kcp.fastresend = resend
 	}
-
-	if nc {
+	if nc >= 0 {
 		kcp.nocwnd = nc
 	}
 
@@ -407,7 +408,7 @@ func (kcp *IKcp) Flush() {
 
 	// calculate window size
 	cwnd = min(kcp.snd_wnd, kcp.rmt_wnd)
-	if !kcp.nocwnd {
+	if kcp.nocwnd == 0 {
 		cwnd = min(kcp.cwnd, cwnd)
 	}
 
