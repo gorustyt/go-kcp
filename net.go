@@ -1,6 +1,7 @@
 package go_kcp
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
@@ -113,6 +114,7 @@ type conn struct {
 	chWriteEvent chan struct{}
 	readTimeOut  time.Time
 	writeTimeOut time.Time
+	buffer       bytes.Buffer
 }
 
 func (c *conn) LocalAddr() net.Addr {
@@ -156,7 +158,14 @@ func (c *conn) Read(b []byte) (n int, err error) {
 		}
 		c.mu.Lock()
 		if size := c.kcp.Peek(); size > 0 {
-			n, err = c.kcp.Recv(b, false)
+			buffer := GetBufferFromPool(4096)
+			n, err = c.kcp.Recv(buffer, false)
+			if err != nil {
+				Error("read bytes from kcp queue error")
+			}
+			c.buffer.Write(buffer[:n])
+			PutBufferToPool(buffer)
+			n, err = c.buffer.Read(b)
 			c.mu.Unlock()
 			return n, err
 		}
@@ -271,6 +280,18 @@ func (c *conn) Input(data []byte) error {
 		c.notifyWriteEvent()
 	}
 	return err
+}
+
+func (c *conn) NoDelay(noDelay int32, interval int32, resend int32, nc bool) {
+	c.mu.Lock()
+	c.kcp.NoDelay(noDelay, interval, resend, nc)
+	c.mu.Unlock()
+}
+
+func (c *conn) SetMtu(mtu uint32) error {
+	c.mu.Lock()
+	defer c.mu.Lock()
+	return c.kcp.SetMtu(mtu)
 }
 
 func (c *conn) Close() error {

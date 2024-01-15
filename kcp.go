@@ -77,11 +77,9 @@ type IKcp struct {
 	buffer     []byte
 	fastresend int32 // 触发快速重传的最大次数
 	fastlimit  int32
-	nocwnd     int32 // nocwnd 取消拥塞控制 (丢包退让，慢启动)
-	stream     int32 // stream 是否采用流传输模式
-	logmask    int
+	nocwnd     bool                                // nocwnd 取消拥塞控制 (丢包退让，慢启动)
+	stream     int32                               // stream 是否采用流传输模式
 	SendMsg    func(buf []byte) (n int, err error) //udp 发送消息模块
-	writelog   func(log []byte, kcp *IKcp, user any)
 }
 
 func NewIKcp(id uint32, user any) *IKcp {
@@ -121,12 +119,9 @@ func NewIKcp(id uint32, user any) *IKcp {
 	kcp.ts_flush = IKCP_INTERVAL
 	kcp.nodelay = 0
 	kcp.updated = 0
-	kcp.logmask = 0
 	kcp.ssthresh = IKCP_THRESH_INIT
 	kcp.fastresend = 0
 	kcp.fastlimit = IKCP_FASTACK_LIMIT
-	kcp.nocwnd = 0
-	kcp.xmit = 0
 	kcp.dead_link = IKCP_DEADLINK
 	return kcp
 }
@@ -141,7 +136,7 @@ func (kcp *IKcp) SetWndSize(sndwnd, rcvwnd uint32) {
 	}
 }
 
-func (kcp *IKcp) NoDelay(noDelay int32, interval int32, resend int32, nc int32) {
+func (kcp *IKcp) NoDelay(noDelay int32, interval int32, resend int32, nc bool) {
 	if noDelay >= 0 {
 		kcp.nodelay = noDelay
 		if noDelay != 0 {
@@ -161,7 +156,8 @@ func (kcp *IKcp) NoDelay(noDelay int32, interval int32, resend int32, nc int32) 
 	if resend >= 0 {
 		kcp.fastresend = resend
 	}
-	if nc >= 0 {
+
+	if nc {
 		kcp.nocwnd = nc
 	}
 
@@ -263,12 +259,8 @@ func (kcp *IKcp) Recv(buffer []byte, isPeek bool) (n int, err error) {
 		if len(buffer) >= int(seg.len) { //如果buffer容量超过一个包的，直接拷贝全部
 			copy(buffer, seg.data)
 		} else {
-			copy(buffer, seg.data[:len(buffer)]) //只拷贝buffer容量大小
-			length += uint32(len(buffer))
-			if !isPeek {
-				seg.len -= uint32(len(buffer))
-				seg.data = seg.data[len(buffer):]
-			}
+			Error("kcp not allow read buffer size too small")
+			return
 		}
 		length += seg.len
 		fragment := seg.frg
@@ -408,7 +400,7 @@ func (kcp *IKcp) Flush() {
 
 	// calculate window size
 	cwnd = min(kcp.snd_wnd, kcp.rmt_wnd)
-	if kcp.nocwnd == 0 {
+	if !kcp.nocwnd {
 		cwnd = min(kcp.cwnd, cwnd)
 	}
 
