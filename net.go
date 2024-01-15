@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"sync"
@@ -159,11 +160,17 @@ func (c *conn) Read(b []byte) (n int, err error) {
 		c.mu.Lock()
 		if size := c.kcp.Peek(); size > 0 {
 			buffer := GetBufferFromPool(4096)
-			n, err = c.kcp.Recv(buffer, false)
-			if err != nil {
-				Error("read bytes from kcp queue error")
+			for size > 0 { //争取一口气读完，释放底层kcp的窗口
+				n, err = c.kcp.Recv(buffer, false)
+				if err != nil {
+					Error("read bytes from kcp queue error")
+				}
+				if n == 0 {
+					panic(fmt.Sprintf("invalid size len:0"))
+				}
+				size -= n
+				c.buffer.Write(buffer[:n])
 			}
-			c.buffer.Write(buffer[:n])
 			PutBufferToPool(buffer)
 			n, err = c.buffer.Read(b)
 			c.mu.Unlock()
